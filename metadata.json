@@ -1,0 +1,8 @@
+{
+  "name": "ShiftSnap",
+  "description": "A professional restaurant clock-in application with selfie verification and GPS enforcement.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
