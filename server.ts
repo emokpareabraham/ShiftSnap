@@ -633,6 +633,32 @@ async function startServer() {
     );
   }
 
+  app.get("/api/debug/google-config", (_req, res) => {
+    const keys = Object.keys(process.env);
+    const hasId = !!process.env.GOOGLE_CLIENT_ID;
+    const hasSecret = !!process.env.GOOGLE_CLIENT_SECRET;
+    
+    const typos = keys.filter(k => 
+      (k.includes("GOOGLE") || k.includes("CLIENT")) && 
+      k !== "GOOGLE_CLIENT_ID" && 
+      k !== "GOOGLE_CLIENT_SECRET"
+    );
+
+    let appUrl = process.env.APP_URL || "";
+    if (appUrl.endsWith("/")) appUrl = appUrl.slice(0, -1);
+    const redirectUri = appUrl ? `${appUrl}/api/auth/google/callback` : "APP_URL not set";
+
+    res.json({
+      configured: hasId && hasSecret,
+      missing: {
+        GOOGLE_CLIENT_ID: !hasId,
+        GOOGLE_CLIENT_SECRET: !hasSecret
+      },
+      detectedTypos: typos,
+      redirectUri: redirectUri
+    });
+  });
+
   app.get("/api/auth/google/url", (_req, res) => {
     const client = getOAuth2Client();
 
@@ -711,8 +737,17 @@ async function startServer() {
     try {
       const tokens = JSON.parse(tokenValue);
       client.setCredentials(tokens);
+
+      // Listen for token refreshes and save them
+      client.on("tokens", async (newTokens) => {
+        console.log("[GOOGLE SHEETS] Tokens refreshed, saving...");
+        const currentTokens = JSON.parse((await getSetting("google_sheets_token")) || "{}");
+        await setSetting("google_sheets_token", JSON.stringify({ ...currentTokens, ...newTokens }));
+      });
+
       const sheets = google.sheets({ version: "v4", auth: client });
 
+      console.log("[GOOGLE SHEETS] Creating spreadsheet...");
       const spreadsheet = await sheets.spreadsheets.create({
         requestBody: {
           properties: { title: `ShiftSnap Export ${new Date().toLocaleDateString()}` },
@@ -723,6 +758,7 @@ async function startServer() {
       if (!spreadsheetId) {
         throw new Error("Google API did not return a spreadsheet ID.");
       }
+      console.log("[GOOGLE SHEETS] Spreadsheet created:", spreadsheetId);
 
       let query = `
         SELECT s.*, e.name as employee_name
@@ -738,6 +774,7 @@ async function startServer() {
 
       query += ` ORDER BY s.timestamp DESC `;
 
+      console.log("[GOOGLE SHEETS] Fetching shifts for export...");
       const shiftsResult =
         params.length > 0
           ? await pool.query(query, params)
@@ -756,12 +793,13 @@ async function startServer() {
         ...shifts.map((s) => [
           s.employee_name,
           String(s.type).toUpperCase(),
-          s.timestamp,
+          s.timestamp instanceof Date ? s.timestamp.toISOString() : String(s.timestamp),
           s.latitude,
           s.longitude,
         ]),
       ];
 
+      console.log("[GOOGLE SHEETS] Updating values...");
       await sheets.spreadsheets.values.update({
         spreadsheetId,
         range: "Sheet1!A1",
@@ -769,21 +807,25 @@ async function startServer() {
         requestBody: { values },
       });
 
+      console.log("[GOOGLE SHEETS] Export successful");
       res.json({
         success: true,
         url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}`,
       });
     } catch (error: any) {
       console.error("[GOOGLE SHEETS EXPORT ERROR]", error);
+      console.error("[ERROR DETAILS]", JSON.stringify(error, null, 2));
 
       let message = "Failed to export to Google Sheets";
       if (error.message?.includes("invalid_grant")) {
         message = "Google connection expired. Please reconnect in Settings.";
-      } else if (error.message?.includes("API has not been used")) {
+      } else if (error.message?.includes("API has not been used") || error.message?.includes("not enabled")) {
         message = "Google Sheets API is not enabled in your Google Cloud Console.";
+      } else if (error.code === 403) {
+        message = "Permission denied. Please ensure the Google Sheets API is enabled and your account has access.";
       }
 
-      res.status(500).json({ error: message });
+      res.status(500).json({ error: message, details: error.message });
     }
   });
 

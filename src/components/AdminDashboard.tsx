@@ -80,9 +80,9 @@ export const AdminDashboard: React.FC<{ onLogout: () => void }> = ({ onLogout })
   const [endDate, setEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [dateRangePreset, setDateRangePreset] = useState<string>('thisMonth');
   const [saveStatus, setSaveStatus] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const [syncLoading, setSyncLoading] = useState(false);
   const [editingShift, setEditingShift] = useState<{ id: number; timestamp: string } | null>(null);
   const [loadingSettings, setLoadingSettings] = useState(false);
+  const [googleConfig, setGoogleConfig] = useState<any>(null);
 
   const [deleteLoading, setDeleteLoading] = useState<number | null>(null);
   const [clearLoading, setClearLoading] = useState(false);
@@ -134,6 +134,12 @@ export const AdminDashboard: React.FC<{ onLogout: () => void }> = ({ onLogout })
       const data = await res.json();
       setSettings(data);
       setGoogleConnected(!!data.google_sheets_token);
+      
+      // Also fetch debug config
+      const configRes = await fetch('/api/debug/google-config');
+      if (configRes.ok) {
+        setGoogleConfig(await configRes.json());
+      }
     } catch (err) {
       console.error('Fetch settings error:', err);
       setSaveStatus({ message: 'Failed to load settings.', type: 'error' });
@@ -289,24 +295,6 @@ export const AdminDashboard: React.FC<{ onLogout: () => void }> = ({ onLogout })
     } catch (err) {
       console.error('Save settings error:', err);
       setSaveStatus({ message: 'Connection error.', type: 'error' });
-    }
-  };
-
-  const handleSyncPostgres = async () => {
-    setSyncLoading(true);
-    try {
-      const res = await fetch('/api/sync/postgres', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok) {
-        alert(`Sync Successful! Last sync: ${format(new Date(data.last_sync), 'PPpp')}`);
-        fetchSettings();
-      } else {
-        alert(data.error || 'Sync failed');
-      }
-    } catch {
-      alert('Sync error');
-    } finally {
-      setSyncLoading(false);
     }
   };
 
@@ -996,6 +984,45 @@ export const AdminDashboard: React.FC<{ onLogout: () => void }> = ({ onLogout })
                 <div className="space-y-4 pt-4 border-t border-zinc-800">
                   <h3 className="text-lg font-bold text-zinc-400">Integrations</h3>
                   <div className="space-y-4">
+                    {googleConfig && !googleConfig.configured && (
+                      <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 space-y-3">
+                        <div className="flex items-center space-x-2 text-red-500 font-bold text-sm">
+                          <AlertCircle size={18} />
+                          <span>Google OAuth Configuration Issue</span>
+                        </div>
+                        
+                        <div className="space-y-2 text-xs text-zinc-400">
+                          {googleConfig.missing.GOOGLE_CLIENT_ID && (
+                            <p>• <code className="text-red-400">GOOGLE_CLIENT_ID</code> is missing.</p>
+                          )}
+                          {googleConfig.missing.GOOGLE_CLIENT_SECRET && (
+                            <p>• <code className="text-red-400">GOOGLE_CLIENT_SECRET</code> is missing.</p>
+                          )}
+                          
+                          {googleConfig.detectedTypos.length > 0 && (
+                            <div className="mt-2 p-2 bg-black/40 rounded-lg border border-red-500/10">
+                              <p className="text-red-400 font-medium mb-1">Potential Typos Detected:</p>
+                              <ul className="list-disc list-inside space-y-1">
+                                {googleConfig.detectedTypos.map((typo: string) => (
+                                  <li key={typo}><code className="text-white">{typo}</code></li>
+                                ))}
+                              </ul>
+                              <p className="mt-2 text-[10px]">Please rename these to exactly <code className="text-emerald-500">GOOGLE_CLIENT_ID</code> or <code className="text-emerald-500">GOOGLE_CLIENT_SECRET</code>.</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="bg-emerald-500/5 border border-emerald-500/10 rounded-2xl p-4 space-y-2">
+                      <p className="text-xs text-zinc-400 leading-relaxed">
+                        To use Google Sheets export, you must set <code className="text-emerald-500">GOOGLE_CLIENT_ID</code> and <code className="text-emerald-500">GOOGLE_CLIENT_SECRET</code> in the <span className="font-bold">Secrets</span> menu of AI Studio.
+                      </p>
+                      <p className="text-[10px] text-zinc-500">
+                        Redirect URI: <code className="bg-black px-1 rounded">{googleConfig?.redirectUri || 'Loading...'}</code>
+                      </p>
+                    </div>
+
                     <div className="flex flex-col space-y-2">
                       <button
                         type="button"
@@ -1036,31 +1063,16 @@ export const AdminDashboard: React.FC<{ onLogout: () => void }> = ({ onLogout })
 
                 <div className="space-y-4 pt-4 border-t border-zinc-800">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-bold text-zinc-400">PostgreSQL Sync</h3>
-                    {settings.last_pg_sync && (
-                      <span className="text-[10px] text-zinc-500">Last sync: {format(new Date(settings.last_pg_sync), 'MMM d, h:mm a')}</span>
-                    )}
+                    <h3 className="text-lg font-bold text-zinc-400">Database Status</h3>
+                    <div className="flex items-center space-x-2">
+                      <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                      <span className="text-xs text-emerald-500 font-medium uppercase tracking-wider">Connected to PostgreSQL</span>
+                    </div>
                   </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm text-zinc-500">Connection Config (JSON)</label>
-                    <textarea
-                      placeholder='{"host": "localhost", "user": "postgres", ...}'
-                      value={typeof settings.pg_config === 'object' ? JSON.stringify(settings.pg_config, null, 2) : settings.pg_config || ''}
-                      onChange={(e) => setSettings((prev: any) => ({ ...prev, pg_config: e.target.value }))}
-                      className="w-full bg-black border border-zinc-800 rounded-xl p-3 focus:outline-none focus:border-emerald-500 transition-all font-mono text-xs h-32"
-                    />
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={handleSyncPostgres}
-                    disabled={syncLoading || !settings.pg_config}
-                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold transition-all text-sm flex items-center justify-center space-x-2 disabled:opacity-50"
-                  >
-                    <Save size={18} />
-                    <span>{syncLoading ? 'Syncing...' : 'Sync to PostgreSQL Now'}</span>
-                  </button>
+                  <p className="text-xs text-zinc-500 leading-relaxed">
+                    Your application is currently using a Supabase PostgreSQL database for persistent storage. 
+                    All employee data and shifts are securely stored in the cloud.
+                  </p>
                 </div>
 
                 <div className="space-y-4 pt-4 border-t border-zinc-800">
